@@ -99,11 +99,13 @@ struct ScanBarcodeView: View {
             }
             VStack {
                 CameraTopBarView(
-                    title: "GroceryScanner",
-                    statusText: "Scan barcode",
+                    title:          "GroceryScanner",
+                    statusText:     "Scan barcode",
                     formattedTotal: cartService.formattedTotal,
-                    isCartEmpty: cartService.items.isEmpty,
-                    onFlashTapped: { viewModel.toggleFlash() }
+                    isCartEmpty:    cartService.items.isEmpty,
+                    isFlashOn:      viewModel.isFlashOn,
+                    isHandDetected: false,
+                    onFlashTapped:  { viewModel.toggleFlash() }
                 )
                 Spacer()
                 if viewModel.showBanner, let result = viewModel.lastScanResult {

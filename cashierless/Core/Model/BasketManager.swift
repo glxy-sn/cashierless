@@ -32,8 +32,11 @@ final class BasketManager: ObservableObject {
 
     // Gunakan closure strong reference, bukan weak protocol reference
     // Sama seperti pola c2: basketManager.cartManager = cartManager
-    var addToCart:      ((Product) -> Void)?
-    var removeFromCart: ((Product) -> Void)?
+    // Closure dengan trackID untuk binding bbox
+    var addToCart:       ((Product, UUID?) -> Void)?
+    var removeFromCart:  ((Product) -> Void)?
+    /// Return true kalau produk ada di cart — untuk validasi TAKE (opsi 2)
+    var isProductInCart: ((Product) -> Bool)?
 
     // Toast callback
     var onBasketEvent: ((BasketEvent) -> Void)?
@@ -78,17 +81,22 @@ final class BasketManager: ObservableObject {
 
         switch action {
 
-        case .approachingBasket:   // PUT
-            if let product = findBestProductInHand() {
-                addToCart?(product)
+        case .approachingBasket:   // PUT — selalu bisa
+            if let (product, trackID) = findBestProductAndTrackInHand() {
+                addToCart?(product, trackID)
                 let event = BasketEvent(action: .put, productName: product.name, confidence: 0.80)
                 itemCount += 1
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 onBasketEvent?(event)
             }
 
-        case .leavingBasket:       // TAKE
-            if let product = findBestProductInHand() {
+        case .leavingBasket:       // TAKE — hanya kalau produk ada di cart
+            if let (product, _) = findBestProductAndTrackInHand() {
+                let inCart = isProductInCart?(product) ?? false
+                guard inCart else {
+                    print("[BasketManager] ⏭ TAKE diabaikan — \(product.name) tidak ada di cart")
+                    return
+                }
                 removeFromCart?(product)
                 let event = BasketEvent(action: .take, productName: product.name, confidence: 0.50)
                 itemCount = max(0, itemCount - 1)
@@ -102,18 +110,19 @@ final class BasketManager: ObservableObject {
 
     // MARK: - Helpers
 
-    private func findBestProductInHand() -> Product? {
+    private func findBestProductAndTrackInHand() -> (Product, UUID?)? {
         guard let lm = landmarks, let handRect = computeHandBBox(from: lm) else { return nil }
         let expandedHand = handRect.insetBy(dx: -0.08, dy: -0.08)
-        var best: (product: Product, ratio: CGFloat)?
+        var best: (product: Product, trackID: UUID?, ratio: CGFloat)?
         for det in currentDetections {
             guard let product = det.product else { continue }
             let ratio = overlapRatio(expandedHand, det.boundingBox)
             if ratio >= 0.10, (best == nil || ratio > best!.ratio) {
-                best = (product, ratio)
+                best = (product, det.id, ratio)
             }
         }
-        return best?.product
+        guard let b = best else { return nil }
+        return (b.product, b.trackID)
     }
 
     private func computeHandBBox(from lm: HandLandmarks) -> CGRect? {

@@ -9,9 +9,9 @@ import CoreML
 import Vision
 import CoreGraphics
 import Foundation
+import CoreVideo
 
 // MARK: - InferenceEngine
-// Port dari GroceryDetector c2 — handle kedua layout tensor, IoU tracker, confirmedFrames
 
 final class InferenceEngine {
 
@@ -19,19 +19,15 @@ final class InferenceEngine {
     let confidenceThreshold: Float  = 0.55
     let iouThreshold:        Float  = 0.30
     private let numClasses          = 12
-    private let emaAlpha:    Float  = 0.30
-    private let maxMissedFrames     = 10
-    private let minFramesToShow     = 1
-    private let matchIoUThreshold: CGFloat = 0.25
 
     // MARK: - State
-    private var visionModel: VNCoreMLModel?
-    private var request:     VNCoreMLRequest?
-    private var trackedDetections: [UUID: TrackedDetection] = [:]
+    private var visionModel:   VNCoreMLModel?
+    private var request:       VNCoreMLRequest?
+    private let tracker        = BoTSORTTracker()
+    private var lastPixelBuffer: CVPixelBuffer?
 
     private(set) var isModelLoaded = false
 
-    // MARK: - Callbacks
     var onDetections:  (([DetectionResult]) -> Void)?
     var onModelLoaded: (() -> Void)?
 
@@ -61,8 +57,7 @@ final class InferenceEngine {
                 let config = MLModelConfiguration()
                 config.computeUnits = .all
                 let mlModel = try MLModel(contentsOf: url, configuration: config)
-
-                let desc = mlModel.modelDescription
+                let desc    = mlModel.modelDescription
                 print("[InferenceEngine] inputs:  \(desc.inputDescriptionsByName.keys)")
                 print("[InferenceEngine] outputs: \(desc.outputDescriptionsByName.keys)")
 
@@ -74,9 +69,9 @@ final class InferenceEngine {
                 req.imageCropAndScaleOption = .scaleFill
 
                 DispatchQueue.main.async {
-                    self.visionModel     = vnModel
-                    self.request         = req
-                    self.isModelLoaded   = true
+                    self.visionModel   = vnModel
+                    self.request       = req
+                    self.isModelLoaded = true
                     self.onModelLoaded?()
                     print("[InferenceEngine] ✅ Model loaded")
                 }
@@ -86,10 +81,11 @@ final class InferenceEngine {
         }
     }
 
-    // MARK: - Run Inference
+    // MARK: - Run
 
     func run(on pixelBuffer: CVPixelBuffer) {
         guard let request else { return }
+        lastPixelBuffer = pixelBuffer
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
         DispatchQueue.global(qos: .userInteractive).async {
             do { try handler.perform([request]) }
@@ -101,7 +97,7 @@ final class InferenceEngine {
 
     private func handleResults(request: VNRequest) {
         guard let results = request.results, !results.isEmpty else {
-            let smoothed = updateTracker(with: [])
+            let smoothed = tracker.update(detections: [], pixelBuffer: lastPixelBuffer)
             DispatchQueue.main.async { self.onDetections?(smoothed) }
             return
         }
@@ -111,8 +107,8 @@ final class InferenceEngine {
         if let observations = results as? [VNRecognizedObjectObservation] {
             for obs in observations {
                 guard let top = obs.labels.first, top.confidence >= confidenceThreshold else { continue }
-                let cls = classIndexFromLabel(top.identifier)
-                let bb  = obs.boundingBox
+                let cls       = classIndexFromLabel(top.identifier)
+                let bb        = obs.boundingBox
                 let converted = CGRect(x: bb.minX, y: 1.0 - bb.maxY, width: bb.width, height: bb.height)
                 newDetections.append(DetectionResult(classIndex: cls, confidence: top.confidence, boundingBox: converted))
             }
@@ -121,120 +117,56 @@ final class InferenceEngine {
         }
 
         let afterNMS = applyNMS(detections: newDetections)
-        let smoothed = updateTracker(with: afterNMS)
-        DispatchQueue.main.async { self.onDetections?(smoothed) }
+        let tracked  = tracker.update(detections: afterNMS, pixelBuffer: lastPixelBuffer)
+        DispatchQueue.main.async { self.onDetections?(tracked) }
     }
 
     // MARK: - Raw Tensor Parser
-    // Handle [batch, features, anchors] dan [batch, anchors, features]
-    // Koordinat output model dalam pixel 640x640 → normalisasi ke 0..1
 
     private func parseRawOutput(_ observations: [VNCoreMLFeatureValueObservation]) -> [DetectionResult] {
         guard let obs        = observations.first,
               let multiArray = obs.featureValue.multiArrayValue else { return [] }
 
-        let shape    = multiArray.shape.map { $0.intValue }
+        let shape     = multiArray.shape.map { $0.intValue }
         let featCount = numClasses + 4
-
-        let anchors: Int
+        let anchors:    Int
         let transposed: Bool
 
         if shape.count == 3 {
-            if shape[1] == featCount      { anchors = shape[2]; transposed = false }
-            else if shape[2] == featCount { anchors = shape[1]; transposed = true  }
+            if shape[1] == featCount       { anchors = shape[2]; transposed = false }
+            else if shape[2] == featCount  { anchors = shape[1]; transposed = true  }
             else { print("[InferenceEngine] ⚠️ Unexpected shape: \(shape)"); return [] }
         } else if shape.count == 2 {
             if shape[0] == featCount { anchors = shape[1]; transposed = false }
             else                     { anchors = shape[0]; transposed = true  }
         } else {
-            print("[InferenceEngine] ⚠️ Cannot handle shape: \(shape)"); return []
+            print("[InferenceEngine] ⚠️ Cannot handle shape: \(shape)")
+            return []
         }
 
         var results = [DetectionResult]()
-
         for i in 0..<anchors {
             func val(_ f: Int) -> Float {
                 let idx = transposed ? i * featCount + f : f * anchors + i
                 return multiArray[idx].floatValue
             }
-
             let cx = val(0), cy = val(1), w = val(2), h = val(3)
-
             var maxConf: Float = 0; var maxClass = 0
             for c in 0..<numClasses {
                 let conf = val(4 + c)
                 if conf > maxConf { maxConf = conf; maxClass = c }
             }
             guard maxConf >= confidenceThreshold else { continue }
-
-            // Koordinat dalam pixel 640 → normalisasi
-            let x  = CGFloat((cx - w/2) / 640)
-            let y  = CGFloat((cy - h/2) / 640)
+            let x  = CGFloat((cx - w / 2) / 640)
+            let y  = CGFloat((cy - h / 2) / 640)
             let bw = CGFloat(w / 640)
             let bh = CGFloat(h / 640)
-
             guard bw > 0.02, bh > 0.02, bw < 0.95, bh < 0.95 else { continue }
             guard x >= -0.1, y >= -0.1 else { continue }
-
             results.append(DetectionResult(classIndex: maxClass, confidence: maxConf,
                                            boundingBox: CGRect(x: x, y: y, width: bw, height: bh)))
         }
         return results
-    }
-
-    // MARK: - IoU Instance Tracker
-
-    private func updateTracker(with newDetections: [DetectionResult]) -> [DetectionResult] {
-        var matchedIDs         = Set<UUID>()
-        var unmatchedDetections = [DetectionResult]()
-
-        for det in newDetections {
-            var bestID: UUID?
-            var bestIoU: CGFloat = matchIoUThreshold
-
-            for (id, tracked) in trackedDetections {
-                guard tracked.classIndex == det.classIndex, !matchedIDs.contains(id) else { continue }
-                let overlap = iou(tracked.smoothedBox, det.boundingBox)
-                if overlap > bestIoU { bestIoU = overlap; bestID = id }
-            }
-
-            if let id = bestID {
-                matchedIDs.insert(id)
-                var t = trackedDetections[id]!
-                t.smoothedConfidence = emaAlpha * det.confidence + (1 - emaAlpha) * t.smoothedConfidence
-                let nb = det.boundingBox; let ob = t.smoothedBox
-                let a = CGFloat(emaAlpha)
-                t.smoothedBox = CGRect(
-                    x:      a * nb.minX   + (1-a) * ob.minX,
-                    y:      a * nb.minY   + (1-a) * ob.minY,
-                    width:  a * nb.width  + (1-a) * ob.width,
-                    height: a * nb.height + (1-a) * ob.height
-                )
-                t.missedFrames    = 0
-                t.confirmedFrames += 1
-                trackedDetections[id] = t
-            } else {
-                unmatchedDetections.append(det)
-            }
-        }
-
-        for id in trackedDetections.keys where !matchedIDs.contains(id) {
-            trackedDetections[id]?.missedFrames += 1
-        }
-        trackedDetections = trackedDetections.filter { $0.value.missedFrames <= maxMissedFrames }
-
-        for det in unmatchedDetections {
-            let id = UUID()
-            trackedDetections[id] = TrackedDetection(
-                id: id, classIndex: det.classIndex,
-                smoothedConfidence: det.confidence * 0.7,
-                smoothedBox: det.boundingBox
-            )
-        }
-
-        return trackedDetections.values
-            .filter { $0.confirmedFrames >= minFramesToShow && $0.smoothedConfidence >= confidenceThreshold }
-            .map { DetectionResult(classIndex: $0.classIndex, confidence: $0.smoothedConfidence, boundingBox: $0.smoothedBox) }
     }
 
     // MARK: - NMS per class
@@ -248,7 +180,7 @@ final class InferenceEngine {
             for i in 0..<sorted.count {
                 guard !suppressed[i] else { continue }
                 result.append(sorted[i])
-                for j in (i+1)..<sorted.count {
+                for j in (i + 1)..<sorted.count {
                     if iou(sorted[i].boundingBox, sorted[j].boundingBox) > CGFloat(iouThreshold) {
                         suppressed[j] = true
                     }
@@ -273,15 +205,4 @@ final class InferenceEngine {
         }
         return 0
     }
-}
-
-// MARK: - TrackedDetection
-
-private struct TrackedDetection {
-    let id:                UUID
-    var classIndex:         Int
-    var smoothedConfidence: Float
-    var smoothedBox:        CGRect
-    var missedFrames:       Int = 0
-    var confirmedFrames:    Int = 1
 }

@@ -9,16 +9,23 @@ import Foundation
 import Vision
 
 // MARK: - Product Depth Tracker
-// Port langsung dari app c2 — deteksi PUT/TAKE berdasarkan perubahan
-// ukuran bounding box produk (proxy depth / Z-axis).
+// Kamera dari atas menghadap keranjang:
+//   box MENGECIL dari baseline → produk masuk keranjang → PUT
+//   box MEMBESAR dari baseline → produk keluar keranjang → TAKE
 
 final class ProductDepthTracker {
 
     // MARK: - Config
-    var minOverlapRatio:      CGFloat = 0.10
-    var depthChangeThreshold: CGFloat = 0.10
-    var minHoldingFrames:     Int     = 3
-    var maxNoOverlapFrames:   Int     = 30
+    var minOverlapRatio:          CGFloat = 0.10
+    var putDepthChangeThreshold:  CGFloat = 0.25   // box harus mengecil 25% untuk PUT
+    var takeDepthChangeThreshold: CGFloat = 0.12   // box harus membesar 12% untuk TAKE
+    var minHoldingFrames:         Int     = 8
+    var maxNoOverlapFrames:       Int     = 30
+
+    // Cooldown per track
+    private var lastFiredTrackID: UUID? = nil
+    private var lastFiredTime:    Date  = .distantPast
+    private let trackCooldown:    TimeInterval = 2.0
 
     // MARK: - Callbacks
     var onAction: ((HandAction) -> Void)?
@@ -27,13 +34,18 @@ final class ProductDepthTracker {
     // MARK: - State
     private enum State {
         case idle
-        case holding(peakArea: CGFloat, currentLabel: String, holdingFrames: Int)
+        case holding(
+            baselineArea:  CGFloat,   // area saat pertama overlap — reference untuk PUT dan TAKE
+            currentLabel:  String,
+            trackID:       UUID?,
+            holdingFrames: Int
+        )
     }
 
-    private var state:            State   = .idle
-    private var noOverlapFrames:  Int     = 0
-    private var smoothedBoxArea:  CGFloat = 0
-    private let emaAlpha:         CGFloat = 0.3
+    private var state:           State   = .idle
+    private var noOverlapFrames: Int     = 0
+    private var smoothedBoxArea: CGFloat = 0
+    private let emaAlpha:        CGFloat = 0.3
 
     // MARK: - Process
 
@@ -62,15 +74,13 @@ final class ProductDepthTracker {
             }
         }
 
-        evaluate(bestMatch: bestMatch, landmarks: landmarks, viewSize: viewSize)
+        evaluate(bestMatch: bestMatch)
     }
 
     // MARK: - State Machine
 
     private func evaluate(
-        bestMatch: (detection: DetectionResult, label: String, overlapRatio: CGFloat)?,
-        landmarks: HandLandmarks,
-        viewSize: CGSize
+        bestMatch: (detection: DetectionResult, label: String, overlapRatio: CGFloat)?
     ) {
         switch state {
 
@@ -80,42 +90,66 @@ final class ProductDepthTracker {
                 onDebug?("idle", 0, 0, 0, false)
                 return
             }
+
+            // Cooldown per track
+            let now = Date()
+            if let lastID = lastFiredTrackID,
+               lastID == match.detection.id,
+               now.timeIntervalSince(lastFiredTime) < trackCooldown {
+                onDebug?("cooldown", 0, match.overlapRatio, 0, true)
+                return
+            }
+
             noOverlapFrames = 0
             let boxArea = match.detection.boundingBox.width * match.detection.boundingBox.height
-            state = .holding(peakArea: boxArea, currentLabel: match.label, holdingFrames: 1)
+            state = .holding(
+                baselineArea:  boxArea,
+                currentLabel:  match.label,
+                trackID:       match.detection.id,
+                holdingFrames: 1
+            )
             smoothedBoxArea = boxArea
-            onDebug?("holding_start", boxArea, match.overlapRatio, 0, true)
+            onDebug?("holding_start", boxArea, match.overlapRatio, 1.0, true)
 
-        case .holding(let peakArea, let label, let holdingFrames):
+        case .holding(let baselineArea, let label, let trackID, let holdingFrames):
             guard let match = bestMatch else {
                 noOverlapFrames += 1
                 if noOverlapFrames > maxNoOverlapFrames { resetState() }
                 return
             }
             noOverlapFrames = 0
+
             let boxArea = match.detection.boundingBox.width * match.detection.boundingBox.height
-            smoothedBoxArea = smoothedBoxArea == 0
-                ? boxArea
-                : emaAlpha * boxArea + (1 - emaAlpha) * smoothedBoxArea
+            smoothedBoxArea = emaAlpha * boxArea + (1 - emaAlpha) * smoothedBoxArea
 
             let newHoldingFrames = holdingFrames + 1
-            let peakAreaRatio    = smoothedBoxArea / peakArea
-            let debugPhase       = String(format: "holding(%.0f%%)", peakAreaRatio * 100)
-            onDebug?(debugPhase, smoothedBoxArea, match.overlapRatio, peakAreaRatio, true)
+            // Ratio terhadap baseline — di bawah 1 = mengecil (PUT), di atas 1 = membesar (TAKE)
+            let ratio        = smoothedBoxArea / baselineArea
+            let debugPhase   = String(format: "holding(%d fr, %.0f%%)", newHoldingFrames, ratio * 100)
+            onDebug?(debugPhase, smoothedBoxArea, match.overlapRatio, ratio, true)
 
             if newHoldingFrames >= minHoldingFrames {
-                if smoothedBoxArea < peakArea * (1 - depthChangeThreshold) {
+                if ratio < (1.0 - putDepthChangeThreshold) {
+                    // Box mengecil 25% dari baseline → PUT
+                    lastFiredTrackID = trackID
+                    lastFiredTime    = Date()
                     fire(.approachingBasket)
                     return
-                } else if smoothedBoxArea > peakArea * (1 + depthChangeThreshold) {
+                } else if ratio > (1.0 + takeDepthChangeThreshold) {
+                    // Box membesar 12% dari baseline → TAKE
+                    lastFiredTrackID = trackID
+                    lastFiredTime    = Date()
                     fire(.leavingBasket)
                     return
                 }
             }
 
+            // PENTING: baselineArea TIDAK di-update — tetap pakai nilai awal
+            // Ini yang fix bug sebelumnya dimana peakArea terus naik sehingga TAKE tidak pernah trigger
             state = .holding(
-                peakArea: max(peakArea, smoothedBoxArea),
-                currentLabel: label,
+                baselineArea:  baselineArea,
+                currentLabel:  label,
+                trackID:       trackID,
                 holdingFrames: newHoldingFrames
             )
         }
@@ -128,7 +162,10 @@ final class ProductDepthTracker {
         guard pts.count >= 3 else { return nil }
         var minX = CGFloat.greatestFiniteMagnitude, maxX = -CGFloat.greatestFiniteMagnitude
         var minY = CGFloat.greatestFiniteMagnitude, maxY = -CGFloat.greatestFiniteMagnitude
-        for p in pts { minX = min(minX,p.x); maxX = max(maxX,p.x); minY = min(minY,p.y); maxY = max(maxY,p.y) }
+        for p in pts {
+            minX = min(minX, p.x); maxX = max(maxX, p.x)
+            minY = min(minY, p.y); maxY = max(maxY, p.y)
+        }
         return CGRect(x: minX, y: 1.0 - maxY, width: maxX - minX, height: maxY - minY)
     }
 
@@ -139,13 +176,20 @@ final class ProductDepthTracker {
         return productArea > 0 ? (inter.width * inter.height) / productArea : 0
     }
 
-    private func fire(_ action: HandAction) { onAction?(action); resetState() }
+    private func fire(_ action: HandAction) {
+        onAction?(action)
+        resetState()
+    }
 
     private func resetState() {
-        state = .idle
+        state           = .idle
         noOverlapFrames = 0
         smoothedBoxArea = 0
     }
 
-    func reset() { resetState() }
+    func reset() {
+        resetState()
+        lastFiredTrackID = nil
+        lastFiredTime    = .distantPast
+    }
 }

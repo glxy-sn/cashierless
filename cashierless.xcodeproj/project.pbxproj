@@ -15,6 +15,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Core/Model/best.mlpackage,
+				Core/Model/osnet_x1_0.mlpackage,
 			);
 			target = 450E1F252FBABF5000DD131D /* cashierless */;
 		};
@@ -26,6 +27,7 @@
 			buildPhase = 450E1F242FBABF5000DD131D /* Resources */;
 			membershipExceptions = (
 				Core/Model/best.mlpackage,
+				Core/Model/osnet_x1_0.mlpackage,
 			);
 		};
 /* End PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */

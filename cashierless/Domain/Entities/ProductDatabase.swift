@@ -11,6 +11,7 @@ import Foundation
 
 enum ProductDatabase {
 
+    // MARK: - Products (by YOLO class index)
     static let products: [Int: Product] = [
         0:  Product(id: 0,  name: "Aqua",                price: 4_000,  emoji: "💧"),
         1:  Product(id: 1,  name: "Chitato",             price: 12_000, emoji: "🥔"),
@@ -26,9 +27,34 @@ enum ProductDatabase {
         11: Product(id: 11, name: "Tissue",              price: 8_000,  emoji: "🧻"),
     ]
 
-    static func product(for classIndex: Int) -> Product? { products[classIndex] }
+    // MARK: - Barcode → Product mapping (EAN-13 / EAN-8 / QR)
+    // Tambahkan barcode produk di sini saat sudah tersedia
+    static let barcodes: [String: Int] = [
+        "8992761002046": 2,
+        "8999999706173": 6,
+        "8992760221028": 5,
+        "089686010947": 3,
+        "8886008101053": 0,
+        "089686598056": 1,
+        "8999999045937": 4,
+        "8997035563544": 7,
+        "8992761111038": 10,
+    ]
+
+    // MARK: - Lookup
+
+    static func product(for classIndex: Int) -> Product? {
+        products[classIndex]
+    }
 
     static func product(named name: String) -> Product? {
         products.values.first { $0.name.lowercased() == name.lowercased() }
+    }
+
+    /// Lookup produk berdasarkan barcode EAN/QR
+    /// Return nil kalau barcode tidak dikenali
+    static func product(forBarcode barcode: String) -> Product? {
+        guard let classIndex = barcodes[barcode] else { return nil }
+        return products[classIndex]
     }
 }

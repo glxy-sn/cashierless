@@ -124,8 +124,9 @@ struct CartEmptyStateView: View {
 
 struct BoundingBoxView: View {
     let detection: DetectionResult
-    let viewSize: CGSize
-    let onTap: () -> Void
+    let viewSize:  CGSize
+    let isBound:   Bool      // true = ter-bind ke barcode scan → warna hijau
+    let onTap:     () -> Void
 
     private var rect: CGRect {
         CGRect(
@@ -137,14 +138,17 @@ struct BoundingBoxView: View {
     }
 
     private var boxColor: Color {
-        detection.confidence > 0.75 ? Color.appGreen : Color(red: 0.937, green: 0.624, blue: 0.153)
+        if isBound { return Color.appGreen }
+        return detection.confidence > 0.75
+            ? Color.appGreen
+            : Color(red: 0.937, green: 0.624, blue: 0.153)
     }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             Rectangle()
-                .stroke(boxColor, lineWidth: 2)
-                .background(boxColor.opacity(0.06))
+                .stroke(boxColor, lineWidth: isBound ? 3 : 2)
+                .background(boxColor.opacity(isBound ? 0.12 : 0.06))
                 .frame(width: rect.width, height: rect.height)
                 .position(x: rect.midX, y: rect.midY)
                 .contentShape(Rectangle())
@@ -152,14 +156,26 @@ struct BoundingBoxView: View {
 
             if let product = detection.product {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(product.name).font(.system(size: 9, weight: .medium)).foregroundStyle(boxColor)
+                    HStack(spacing: 4) {
+                        if isBound {
+                            Image(systemName: "barcode.viewfinder")
+                                .font(.system(size: 8))
+                                .foregroundStyle(boxColor)
+                        }
+                        Text(product.name)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(boxColor)
+                    }
                     HStack(spacing: 5) {
-                        Text(product.formattedPrice).font(.system(size: 9)).foregroundStyle(.white)
-                        Text(detection.confidencePercent).font(.system(size: 9)).foregroundStyle(Color(white: 0.5))
+                        Text(product.formattedPrice)
+                            .font(.system(size: 9)).foregroundStyle(.white)
+                        Text(detection.confidencePercent)
+                            .font(.system(size: 9)).foregroundStyle(Color(white: 0.5))
                     }
                 }
                 .padding(.horizontal, 6).padding(.vertical, 3)
-                .background(.black.opacity(0.78)).clipShape(RoundedRectangle(cornerRadius: 5))
+                .background(.black.opacity(0.78))
+                .clipShape(RoundedRectangle(cornerRadius: 5))
                 .position(x: rect.minX + 50, y: rect.minY - 20)
             }
         }
@@ -170,35 +186,42 @@ struct BoundingBoxView: View {
 // MARK: - CameraTopBarView
 
 struct CameraTopBarView: View {
-    let title: String
-    let statusText: String
+    let title:          String
+    let statusText:     String
     let formattedTotal: String
-    let isCartEmpty: Bool
-    let onFlashTapped: () -> Void
+    let isCartEmpty:    Bool
+    let isFlashOn:      Bool
+    let isHandDetected: Bool
+    let onFlashTapped:  () -> Void
 
     var body: some View {
         HStack(alignment: .top) {
+
+            // Kiri: title + status
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Image(systemName: "cart").font(.system(size: 12)).foregroundStyle(Color.appGreen)
-                    Text(title).font(.system(size: 14, weight: .medium)).foregroundStyle(.white)
+                    Image(systemName: "cart")
+                        .font(.system(size: 12)).foregroundStyle(Color.appGreen)
+                    Text(title)
+                        .font(.system(size: 14, weight: .medium)).foregroundStyle(.white)
                 }
-                Text(statusText).font(.system(size: 10)).foregroundStyle(.white.opacity(0.6))
+                Text(statusText)
+                    .font(.system(size: 10)).foregroundStyle(.white.opacity(0.6))
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(.black.opacity(0.55)).clipShape(Capsule())
             }
+
             Spacer()
-            HStack(spacing: 10) {
-                if !isCartEmpty {
-                    Text(formattedTotal).font(.system(size: 13, weight: .medium)).foregroundStyle(Color.appGreen)
-                        .padding(.horizontal, 12).padding(.vertical, 6)
-                        .background(Color.appGreenDeep).clipShape(RoundedRectangle(cornerRadius: 9)).monospacedDigit()
-                }
-                Button(action: onFlashTapped) {
-                    Image(systemName: "bolt").font(.system(size: 16)).foregroundStyle(.white)
-                        .frame(width: 36, height: 36).background(.white.opacity(0.15)).clipShape(Circle())
-                }.buttonStyle(.plain)
-            }
+
+            // Kanan: flash button saja
+            Button(action: onFlashTapped) {
+                Image(systemName: isFlashOn ? "bolt.fill" : "bolt.slash.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(isFlashOn ? Color(red: 1.0, green: 0.85, blue: 0.0) : .white)
+                    .frame(width: 36, height: 36)
+                    .background(isFlashOn ? Color(red: 0.4, green: 0.35, blue: 0.0) : .white.opacity(0.15))
+                    .clipShape(Circle())
+            }.buttonStyle(.plain)
         }
         .padding(.horizontal, 14).padding(.top, 12)
     }
@@ -259,23 +282,32 @@ struct AppTabBarView: View {
 struct BasketToastView: View {
     let event: BasketEvent
 
+    private var isPut: Bool { event.action == .put }
+    private var accentColor: Color { isPut ? Color.appGreen : Color(red: 1.0, green: 0.58, blue: 0.0) }
+    private var borderColor: Color { isPut ? Color.appGreenDark : Color(red: 0.6, green: 0.3, blue: 0.0) }
+    private var icon: String { isPut ? "arrow.down.circle.fill" : "arrow.up.circle.fill" }
+    private var label: String { isPut ? "Dimasukkan" : "Dikeluarkan" }
+
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: event.action == .put ? "checkmark.circle" : "arrow.up.circle")
-                .font(.system(size: 17)).foregroundStyle(Color.appGreen)
+            Image(systemName: icon)
+                .font(.system(size: 20))
+                .foregroundStyle(accentColor)
             VStack(alignment: .leading, spacing: 2) {
-                Text(event.action == .put
-                     ? "\(event.productName) dimasukkan ke keranjang"
-                     : "\(event.productName) dikeluarkan dari keranjang")
-                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.white)
+                Text(label)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(accentColor)
+                Text(event.productName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
                 Text("gerakan tangan terdeteksi")
                     .font(.system(size: 9)).foregroundStyle(.white.opacity(0.4))
             }
             Spacer()
         }
-        .padding(.horizontal, 13).padding(.vertical, 10)
+        .padding(.horizontal, 14).padding(.vertical, 10)
         .background(.black.opacity(0.88))
-        .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.appGreenDark, lineWidth: 0.5))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(borderColor, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 11))
     }
 }

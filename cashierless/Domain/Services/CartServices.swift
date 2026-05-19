@@ -29,6 +29,9 @@ final class CartServiceImpl: CartService, ObservableObject {
 
     @Published private(set) var items: [CartItem] = []
 
+    /// Track IDs yang sudah ter-bind ke barcode scan — ditampilkan hijau di bbox
+    @Published private(set) var boundTrackIDs: Set<UUID> = []
+
     var totalPrice: Int  { items.reduce(0) { $0 + $1.subtotal } }
     var totalItems: Int  { items.reduce(0) { $0 + $1.quantity } }
 
@@ -50,6 +53,15 @@ final class CartServiceImpl: CartService, ObservableObject {
         }
     }
 
+    /// Bind track UUID ke cart item — bbox akan berubah warna hijau
+    func bindTrack(_ trackID: UUID, to product: Product) {
+        boundTrackIDs.insert(trackID)
+    }
+
+    func isTrackBound(_ trackID: UUID) -> Bool {
+        boundTrackIDs.contains(trackID)
+    }
+
     func increaseQuantity(for item: CartItem) {
         guard let idx = items.firstIndex(of: item) else { return }
         items[idx].quantity += 1
@@ -63,5 +75,8 @@ final class CartServiceImpl: CartService, ObservableObject {
 
     func removeItem(_ item: CartItem) { items.removeAll { $0.id == item.id } }
 
-    func clearCart() { items.removeAll() }
+    func clearCart() {
+        items.removeAll()
+        boundTrackIDs.removeAll()
+    }
 }

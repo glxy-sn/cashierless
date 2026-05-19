@@ -139,7 +139,12 @@ final class BarcodeEngine: NSObject, ObservableObject {
 
     func start() {
         sessionQueue.async { [weak self] in
-            guard let self, !self.session.isRunning else { return }
+            guard let self else { return }
+            // Re-attach delegate kalau sebelumnya dilepas setelah scan
+            if self.metadataOutput.metadataObjectsCallbackQueue == nil {
+                self.metadataOutput.setMetadataObjectsDelegate(self, queue: .main)
+            }
+            guard !self.session.isRunning else { return }
             self.session.startRunning()
             DispatchQueue.main.async {
                 self.isRunning = true
@@ -194,6 +199,10 @@ extension BarcodeEngine: AVCaptureMetadataOutputObjectsDelegate {
                 .replacingOccurrences(of: "org.gs1.", with: "")
                 .replacingOccurrences(of: "com.apple.", with: "")
                 .uppercased()
+
+            // Langsung disable delegate setelah 1 scan berhasil
+            // mencegah scan berulang selama ViewModel masih proses
+            metadataOutput.setMetadataObjectsDelegate(nil, queue: nil)
 
             onScan?(BarcodeResult(value: value, symbology: symbology))
             return

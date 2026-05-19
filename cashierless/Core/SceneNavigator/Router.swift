@@ -11,7 +11,6 @@ import Combine
 
 enum AppRoute: Hashable {
     case detection
-    case scanBarcode
     case checkout
 }
 
