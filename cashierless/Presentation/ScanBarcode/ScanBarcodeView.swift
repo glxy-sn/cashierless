@@ -65,6 +65,7 @@ final class ScanBarcodeViewModel: ObservableObject {
 struct ScanBarcodeView: View {
 
     @StateObject private var viewModel: ScanBarcodeViewModel
+    @StateObject private var viewModelBasket = BasketManager()
     private let cartService: CartServiceImpl
 
     init(barcodeEngine: BarcodeEngine, cartService: CartServiceImpl) {
@@ -79,7 +80,7 @@ struct ScanBarcodeView: View {
         GeometryReader { geo in
             VStack(spacing: 0) {
                 barcodeCameraSection(geo: geo).frame(height: geo.size.height * 0.58)
-                CartPanelView(cartService: cartService)
+                CartPanelView(cartService: cartService, basketManager: viewModelBasket)
             }
         }
         .background(Color.appBackground)
@@ -118,3 +119,4 @@ struct ScanBarcodeView: View {
         }
     }
 }
+

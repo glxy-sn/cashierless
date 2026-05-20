@@ -669,7 +669,7 @@ struct DetectionView: View {
         GeometryReader { geo in
             VStack(spacing: 0) {
                 cameraSection(geo: geo).frame(height: geo.size.height * 0.58)
-                CartPanelView(cartService: cartService)
+                CartPanelView(cartService: cartService, basketManager: viewModel.basketManager)
             }
         }
         .background(Color.appBackground)
@@ -808,6 +808,7 @@ struct DetectionView: View {
 
 struct CartPanelView: View {
     @ObservedObject var cartService: CartServiceImpl
+    let basketManager: BasketManager
     @EnvironmentObject var router: Router
     @State private var showClearConfirm = false
 
@@ -838,7 +839,10 @@ struct CartPanelView: View {
                         isPresented: $showClearConfirm,
                         titleVisibility: .visible
                     ) {
-                        Button("Hapus Semua", role: .destructive) { cartService.clearCart() }
+                        Button("Hapus Semua", role: .destructive) {
+                            cartService.clearCart()
+                            basketManager.clearHistory()
+                        }
                         Button("Batal", role: .cancel) {}
                     }
                 }
