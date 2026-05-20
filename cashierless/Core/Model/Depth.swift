@@ -9,25 +9,20 @@ import Foundation
 import Vision
 
 // MARK: - Product Depth Tracker
-// Kamera dari atas menghadap keranjang:
-//   box MENGECIL dari baseline → produk masuk keranjang → PUT
-//   box MEMBESAR dari baseline → produk keluar keranjang → TAKE
+// Sekarang hanya dipakai untuk debug overlay (phase, boxArea, overlap, ratio).
+// Logic PUT/TAKE sudah dipindah ke BasketManager berbasis Re-ID track awareness.
 
 final class ProductDepthTracker {
 
     // MARK: - Config
     var minOverlapRatio:          CGFloat = 0.10
-    var putDepthChangeThreshold:  CGFloat = 0.25   // box harus mengecil 25% untuk PUT
-    var takeDepthChangeThreshold: CGFloat = 0.12   // box harus membesar 12% untuk TAKE
+    var putDepthChangeThreshold:  CGFloat = 0.25
+    var takeDepthChangeThreshold: CGFloat = 0.12
     var minHoldingFrames:         Int     = 8
     var maxNoOverlapFrames:       Int     = 30
 
-    // Cooldown per track
-    private var lastFiredTrackID: UUID? = nil
-    private var lastFiredTime:    Date  = .distantPast
-    private let trackCooldown:    TimeInterval = 2.0
-
     // MARK: - Callbacks
+    // onAction tidak dipakai lagi oleh BasketManager (dibiarkan untuk kompatibilitas)
     var onAction: ((HandAction) -> Void)?
     var onDebug:  ((String, CGFloat, CGFloat, CGFloat, Bool) -> Void)?
 
@@ -35,7 +30,7 @@ final class ProductDepthTracker {
     private enum State {
         case idle
         case holding(
-            baselineArea:  CGFloat,   // area saat pertama overlap — reference untuk PUT dan TAKE
+            baselineArea:  CGFloat,
             currentLabel:  String,
             trackID:       UUID?,
             holdingFrames: Int
@@ -77,7 +72,7 @@ final class ProductDepthTracker {
         evaluate(bestMatch: bestMatch)
     }
 
-    // MARK: - State Machine
+    // MARK: - State Machine (debug only — tidak fire action ke BasketManager)
 
     private func evaluate(
         bestMatch: (detection: DetectionResult, label: String, overlapRatio: CGFloat)?
@@ -90,16 +85,6 @@ final class ProductDepthTracker {
                 onDebug?("idle", 0, 0, 0, false)
                 return
             }
-
-            // Cooldown per track
-            let now = Date()
-            if let lastID = lastFiredTrackID,
-               lastID == match.detection.id,
-               now.timeIntervalSince(lastFiredTime) < trackCooldown {
-                onDebug?("cooldown", 0, match.overlapRatio, 0, true)
-                return
-            }
-
             noOverlapFrames = 0
             let boxArea = match.detection.boundingBox.width * match.detection.boundingBox.height
             state = .holding(
@@ -115,6 +100,7 @@ final class ProductDepthTracker {
             guard let match = bestMatch else {
                 noOverlapFrames += 1
                 if noOverlapFrames > maxNoOverlapFrames { resetState() }
+                onDebug?("holding_lost(\(noOverlapFrames)fr)", smoothedBoxArea, 0, smoothedBoxArea / baselineArea, true)
                 return
             }
             noOverlapFrames = 0
@@ -123,29 +109,11 @@ final class ProductDepthTracker {
             smoothedBoxArea = emaAlpha * boxArea + (1 - emaAlpha) * smoothedBoxArea
 
             let newHoldingFrames = holdingFrames + 1
-            // Ratio terhadap baseline — di bawah 1 = mengecil (PUT), di atas 1 = membesar (TAKE)
             let ratio        = smoothedBoxArea / baselineArea
             let debugPhase   = String(format: "holding(%d fr, %.0f%%)", newHoldingFrames, ratio * 100)
             onDebug?(debugPhase, smoothedBoxArea, match.overlapRatio, ratio, true)
 
-            if newHoldingFrames >= minHoldingFrames {
-                if ratio < (1.0 - putDepthChangeThreshold) {
-                    // Box mengecil 25% dari baseline → PUT
-                    lastFiredTrackID = trackID
-                    lastFiredTime    = Date()
-                    fire(.approachingBasket)
-                    return
-                } else if ratio > (1.0 + takeDepthChangeThreshold) {
-                    // Box membesar 12% dari baseline → TAKE
-                    lastFiredTrackID = trackID
-                    lastFiredTime    = Date()
-                    fire(.leavingBasket)
-                    return
-                }
-            }
-
-            // PENTING: baselineArea TIDAK di-update — tetap pakai nilai awal
-            // Ini yang fix bug sebelumnya dimana peakArea terus naik sehingga TAKE tidak pernah trigger
+            // Tetap update state untuk debug, tapi TIDAK fire action
             state = .holding(
                 baselineArea:  baselineArea,
                 currentLabel:  label,
@@ -176,20 +144,11 @@ final class ProductDepthTracker {
         return productArea > 0 ? (inter.width * inter.height) / productArea : 0
     }
 
-    private func fire(_ action: HandAction) {
-        onAction?(action)
-        resetState()
-    }
-
     private func resetState() {
         state           = .idle
         noOverlapFrames = 0
         smoothedBoxArea = 0
     }
 
-    func reset() {
-        resetState()
-        lastFiredTrackID = nil
-        lastFiredTime    = .distantPast
-    }
+    func reset() { resetState() }
 }
